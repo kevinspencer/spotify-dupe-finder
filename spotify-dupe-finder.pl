@@ -89,7 +89,10 @@ if ($total_fuzzy > 0) {
     } @fuzzy_dupe_keys;
 
     for my $key (@sorted_keys) {
-        my @group = sort { $a->{added_at} cmp $b->{added_at} } @{ $by_key{$key} };
+        my @group = sort {
+            (($a->{title} eq $a->{title_clean}) ? 0 : 1) <=> (($b->{title} eq $b->{title_clean}) ? 0 : 1)
+                || $a->{added_at} cmp $b->{added_at}
+        } @{ $by_key{$key} };
         my $first = $group[0];
         printf "  %s - %s\n", $first->{artist}, $first->{title_clean};
         for my $i (0 .. $#group) {
