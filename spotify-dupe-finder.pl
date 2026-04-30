@@ -7,6 +7,7 @@ use JSON;
 use File::Path qw(make_path);
 use IO::Socket::INET;
 use MIME::Base64 qw(encode_base64);
+use URI::Escape qw(uri_escape);
 use strict;
 use warnings;
 use Getopt::Long;
@@ -145,10 +146,10 @@ if (@dupe_ids) {
         my @remaining = @dupe_ids;
         my $batch_num = 1;
         while (@remaining) {
-            my @batch = splice(@remaining, 0, 50);
-            printf "  DELETE https://api.spotify.com/v1/me/tracks  (batch %d, %d track(s))\n",
+            my @batch = splice(@remaining, 0, 40);
+            printf "  DELETE https://api.spotify.com/v1/me/library  (batch %d, %d track(s))\n",
                 $batch_num++, scalar(@batch);
-            printf "    ids: %s\n", join(', ', @batch);
+            printf "    uris: %s\n", join(', ', map { "spotify:track:$_" } @batch);
         }
         print "\n[DRY RUN] No tracks were removed.\n";
     } else {
@@ -175,22 +176,21 @@ sub remove_spotify_tracks {
     my @batches;
     my @remaining = @$ids;
     while (@remaining) {
-        push @batches, [splice(@remaining, 0, 50)];
+        push @batches, [splice(@remaining, 0, 40)];
     }
 
     printf "Removing %d track(s) in %d batch(es)...\n", scalar(@$ids), scalar(@batches);
 
     my $removed = 0;
     for my $batch (@batches) {
+        my $uris_param = join(',', map { uri_escape("spotify:track:$_") } @$batch);
+        my $delete_url = "https://api.spotify.com/v1/me/library?uris=$uris_param";
+        printf "  Batch of %d tracks...\n", scalar(@$batch);
         my $response = $ua->request(
             HTTP::Request->new(
                 'DELETE',
-                'https://api.spotify.com/v1/me/tracks',
-                [
-                    Authorization  => "Bearer $access_token",
-                    'Content-Type' => 'application/json',
-                ],
-                encode_json({ ids => $batch }),
+                $delete_url,
+                [ Authorization => "Bearer $access_token" ],
             )
         );
         if ($response->is_success()) {
@@ -198,6 +198,7 @@ sub remove_spotify_tracks {
             printf "  Removed %d / %d\n", $removed, scalar(@$ids);
         } else {
             printf "  Batch failed: %s\n", $response->status_line();
+            printf "  Response: %s\n", $response->content();
         }
     }
 
@@ -311,10 +312,10 @@ sub do_spotify_oauth {
     my $scope        = 'user-library-read user-library-modify';
 
     my $auth_url = "https://accounts.spotify.com/authorize"
-                 . "?client_id=$client_id"
+                 . "?client_id=" . uri_escape($client_id)
                  . "&response_type=code"
-                 . "&redirect_uri=$redirect_uri"
-                 . "&scope=$scope";
+                 . "&redirect_uri=" . uri_escape($redirect_uri)
+                 . "&scope=" . uri_escape($scope);
 
     print "Opening Spotify authorization in browser...\n";
     print "If it doesn't open automatically, visit:\n$auth_url\n\n";
