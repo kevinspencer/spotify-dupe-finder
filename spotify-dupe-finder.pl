@@ -2,12 +2,17 @@
 
 use YAML::Tiny;
 use LWP::UserAgent;
+use HTTP::Request;
 use JSON;
 use File::Path qw(make_path);
 use IO::Socket::INET;
 use MIME::Base64 qw(encode_base64);
 use strict;
 use warnings;
+use Getopt::Long;
+
+my $dry_run = 0;
+GetOptions('dry-run' => \$dry_run);
 
 my $config_file  = 'conf/config.yaml';
 my $cache_dir    = 'cache';
@@ -108,6 +113,95 @@ if ($total_fuzzy > 0) {
 
 if ($total_exact == 0 && $total_fuzzy == 0) {
     print "\nNo duplicates found.\n";
+}
+
+# Collect all DUPE track IDs (second+ entry in each fuzzy group, plus exact dupes beyond the first)
+my @dupe_ids;
+
+for my $id (@exact_dupe_ids) {
+    my @entries = @{ $by_id{$id} };
+    # Keep one, remove the rest (by count of extras)
+    for (2 .. scalar(@entries)) {
+        push @dupe_ids, $id;
+    }
+}
+
+for my $key (@fuzzy_dupe_keys) {
+    my @group = sort {
+        (($a->{title} eq $a->{title_clean}) ? 0 : 1) <=> (($b->{title} eq $b->{title_clean}) ? 0 : 1)
+            || $a->{added_at} cmp $b->{added_at}
+    } @{ $by_key{$key} };
+    for my $i (1 .. $#group) {
+        push @dupe_ids, $group[$i]{track_id};
+    }
+}
+
+if (@dupe_ids) {
+    print "\n" . "=" x 60 . "\n";
+    printf "Found %d track(s) to remove.\n", scalar(@dupe_ids);
+
+    if ($dry_run) {
+        print "\n[DRY RUN] The following Spotify API calls would be made:\n\n";
+        my @remaining = @dupe_ids;
+        my $batch_num = 1;
+        while (@remaining) {
+            my @batch = splice(@remaining, 0, 50);
+            printf "  DELETE https://api.spotify.com/v1/me/tracks  (batch %d, %d track(s))\n",
+                $batch_num++, scalar(@batch);
+            printf "    ids: %s\n", join(', ', @batch);
+        }
+        print "\n[DRY RUN] No tracks were removed.\n";
+    } else {
+        print "Would you like to remove the [DUPE] tracks from your Spotify library? [y/n] ";
+        chomp(my $answer = <STDIN>);
+        if (lc($answer) eq 'y') {
+            print "Are you sure? This cannot be undone. Type YES to confirm: ";
+            chomp(my $confirm = <STDIN>);
+            if ($confirm eq 'YES') {
+                my $access_token = get_spotify_token($config, $token_cache);
+                remove_spotify_tracks($ua, $access_token, \@dupe_ids);
+            } else {
+                print "Aborted.\n";
+            }
+        } else {
+            print "No tracks removed.\n";
+        }
+    }
+}
+
+sub remove_spotify_tracks {
+    my ($ua, $access_token, $ids) = @_;
+
+    my @batches;
+    my @remaining = @$ids;
+    while (@remaining) {
+        push @batches, [splice(@remaining, 0, 50)];
+    }
+
+    printf "Removing %d track(s) in %d batch(es)...\n", scalar(@$ids), scalar(@batches);
+
+    my $removed = 0;
+    for my $batch (@batches) {
+        my $response = $ua->request(
+            HTTP::Request->new(
+                'DELETE',
+                'https://api.spotify.com/v1/me/tracks',
+                [
+                    Authorization  => "Bearer $access_token",
+                    'Content-Type' => 'application/json',
+                ],
+                encode_json({ ids => $batch }),
+            )
+        );
+        if ($response->is_success()) {
+            $removed += scalar(@$batch);
+            printf "  Removed %d / %d\n", $removed, scalar(@$ids);
+        } else {
+            printf "  Batch failed: %s\n", $response->status_line();
+        }
+    }
+
+    print "Done. $removed track(s) removed from your library.\n";
 }
 
 sub fetch_spotify_tracks {
@@ -214,7 +308,7 @@ sub do_spotify_oauth {
 
     my $client_id    = $config->{spotify}{client_id};
     my $redirect_uri = $config->{spotify}{redirect_uri};
-    my $scope        = 'user-library-read';
+    my $scope        = 'user-library-read user-library-modify';
 
     my $auth_url = "https://accounts.spotify.com/authorize"
                  . "?client_id=$client_id"
